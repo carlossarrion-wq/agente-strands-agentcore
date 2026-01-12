@@ -1,0 +1,5 @@
+# Dependencias para agente Strands con AgentCore
+bedrock-agentcore-starter-toolkit>=0.1.21
+strands-agents>=1.21.0
+strands-agents-tools>=0.2.19
+boto3>=1.35.0
