@@ -12,6 +12,7 @@ Para desplegar: agentcore deploy
 
 import os
 import logging
+import boto3
 from strands import Agent
 from strands_tools.use_aws import use_aws
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
@@ -29,8 +30,71 @@ os.environ["BYPASS_TOOL_CONSENT"] = "true"
 app = BedrockAgentCoreApp()
 
 # Configuración del modelo y región
-REGION = os.getenv("AWS_REGION", "eu-central-1")
+REGION = os.getenv("AWS_REGION", "eu-west-1")
 MODEL_ID = "eu.anthropic.claude-sonnet-4-20250514-v1:0"
+
+# Configuración del Prompt Management
+PROMPT_ID = "2PVM4E6CF4"
+PROMPT_VERSION = "1"  # Usar versión específica o "$LATEST" para la última
+
+
+def get_system_prompt_from_bedrock():
+    """
+    Obtiene el system prompt desde AWS Bedrock Prompt Management
+    
+    Returns:
+        str: El texto del system prompt
+    """
+    try:
+        bedrock_agent = boto3.client('bedrock-agent', region_name=REGION)
+        
+        # Obtener el prompt desde Bedrock
+        response = bedrock_agent.get_prompt(
+            promptIdentifier=PROMPT_ID,
+            promptVersion=PROMPT_VERSION
+        )
+        
+        # Extraer el texto del prompt de la variante por defecto
+        default_variant = response.get('defaultVariant', 'default')
+        for variant in response.get('variants', []):
+            if variant['name'] == default_variant:
+                template_config = variant.get('templateConfiguration', {})
+                text_config = template_config.get('text', {})
+                prompt_text = text_config.get('text', '')
+                
+                print(f"✅ System prompt obtenido desde Bedrock (ID: {PROMPT_ID}, Version: {PROMPT_VERSION})")
+                return prompt_text
+        
+        # Fallback si no se encuentra el prompt
+        print(f"⚠️ No se pudo obtener el prompt desde Bedrock, usando prompt por defecto")
+        return get_default_system_prompt()
+        
+    except Exception as e:
+        print(f"❌ Error obteniendo prompt desde Bedrock: {str(e)}")
+        print(f"⚠️ Usando prompt por defecto")
+        return get_default_system_prompt()
+
+
+def get_default_system_prompt():
+    """
+    Prompt por defecto en caso de que falle la obtención desde Bedrock
+    """
+    return """Eres un asistente útil especializado en AWS.
+Respondes de forma clara y directa.
+Tienes acceso a herramientas para consultar información de AWS.
+Cuando te pidan información sobre recursos AWS, usa la herramienta use_aws.
+
+Para obtener el número de cuenta AWS, usa:
+- service_name: 'sts'
+- operation_name: 'get_caller_identity'
+- parameters: {}
+
+Para listar buckets S3, usa:
+- service_name: 's3'
+- operation_name: 'list_buckets'
+- parameters: {}
+
+Siempre proporciona respuestas concisas y útiles."""
 
 
 @app.entrypoint
@@ -51,20 +115,13 @@ async def agent_invocation(payload, context):
     print(f"📝 Contexto de sesión: {session_id}")
     print(f"🤖 Procesando mensaje: {user_message}")
     
+    # Obtener el system prompt desde Bedrock Prompt Management
+    system_prompt = get_system_prompt_from_bedrock()
+    
     # Crear el agente con herramientas AWS
     agent = Agent(
         model=MODEL_ID,
-        system_prompt="""Eres un asistente útil especializado en AWS.
-Respondes de forma clara y directa.
-Tienes acceso a herramientas para consultar información de AWS.
-Cuando te pidan información sobre recursos AWS, usa la herramienta use_aws.
-
-Para listar buckets S3, usa:
-- service_name: 's3'
-- operation_name: 'list_buckets'
-- parameters: {}
-
-Siempre proporciona respuestas concisas y útiles.""",
+        system_prompt=system_prompt,
         tools=[use_aws]
     )
     
