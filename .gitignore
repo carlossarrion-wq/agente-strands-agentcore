@@ -23,6 +23,7 @@ Thumbs.db
 
 # AgentCore
 .bedrock_agentcore.yaml
+.bedrock_agentcore/
 
 # Logs
 *.log
@@ -30,3 +31,9 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.bak
+
+# Archivos con credenciales AWS (NO SUBIR A GITHUB)
+*_auth.py
+*credentials*.json
+*-policy.json
+trust-policy.json
