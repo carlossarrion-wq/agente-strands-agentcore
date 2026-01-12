@@ -37,6 +37,10 @@ MODEL_ID = "eu.anthropic.claude-sonnet-4-20250514-v1:0"
 PROMPT_ID = "2PVM4E6CF4"
 PROMPT_VERSION = "1"  # Usar versión específica o "$LATEST" para la última
 
+# Configuración de Guardrails
+GUARDRAIL_ID = "o3gunqke20fy"
+GUARDRAIL_VERSION = "1"  # Usar versión específica o "DRAFT" para la última
+
 
 def get_system_prompt_from_bedrock():
     """
@@ -97,6 +101,73 @@ Para listar buckets S3, usa:
 Siempre proporciona respuestas concisas y útiles."""
 
 
+def validate_with_guardrail(content, source="INPUT"):
+    """
+    Valida contenido usando AWS Bedrock Guardrails
+    
+    Args:
+        content: El texto a validar
+        source: "INPUT" para validar entrada del usuario, "OUTPUT" para validar respuesta del agente
+    
+    Returns:
+        dict: {
+            "is_valid": bool,
+            "action": str,  # "NONE" o "GUARDRAIL_INTERVENED"
+            "message": str,  # Mensaje de bloqueo si aplica
+            "assessments": list  # Detalles de las evaluaciones
+        }
+    """
+    try:
+        bedrock_runtime = boto3.client('bedrock-runtime', region_name=REGION)
+        
+        # Aplicar guardrail
+        response = bedrock_runtime.apply_guardrail(
+            guardrailIdentifier=GUARDRAIL_ID,
+            guardrailVersion=GUARDRAIL_VERSION,
+            source=source,
+            content=[{
+                'text': {
+                    'text': content
+                }
+            }]
+        )
+        
+        action = response.get('action', 'NONE')
+        is_valid = action == 'NONE'
+        
+        result = {
+            'is_valid': is_valid,
+            'action': action,
+            'message': '',
+            'assessments': response.get('assessments', [])
+        }
+        
+        # Si fue bloqueado, obtener el mensaje apropiado
+        if not is_valid:
+            if source == "INPUT":
+                result['message'] = "Lo siento, tu mensaje contiene contenido que no puedo procesar. Por favor, reformula tu pregunta."
+            else:
+                result['message'] = "Lo siento, no puedo proporcionar esa información."
+            
+            print(f"🛡️ Guardrail bloqueó {source}: {action}")
+            for assessment in result['assessments']:
+                print(f"   - {assessment}")
+        else:
+            print(f"✅ Guardrail validó {source} correctamente")
+        
+        return result
+        
+    except Exception as e:
+        print(f"⚠️ Error validando con Guardrail: {str(e)}")
+        # En caso de error, permitir el contenido (fail-open)
+        return {
+            'is_valid': True,
+            'action': 'NONE',
+            'message': '',
+            'assessments': []
+        }
+
+
 @app.entrypoint
 async def agent_invocation(payload, context):
     """
@@ -115,6 +186,15 @@ async def agent_invocation(payload, context):
     print(f"📝 Contexto de sesión: {session_id}")
     print(f"🤖 Procesando mensaje: {user_message}")
     
+    # 🛡️ PASO 1: Validar INPUT con Guardrail
+    input_validation = validate_with_guardrail(user_message, source="INPUT")
+    
+    if not input_validation['is_valid']:
+        # Si el input fue bloqueado, devolver mensaje de error
+        print(f"❌ Input bloqueado por Guardrail")
+        yield input_validation['message']
+        return
+    
     # Obtener el system prompt desde Bedrock Prompt Management
     system_prompt = get_system_prompt_from_bedrock()
     
@@ -127,6 +207,9 @@ async def agent_invocation(payload, context):
     
     # Obtener el stream del agente
     agent_stream = agent.stream_async(user_message)
+    
+    # Acumular la respuesta completa para validar el output
+    full_response = ""
     
     # Procesar y enviar eventos de streaming - SOLO TEXTO
     async for event in agent_stream:
@@ -145,9 +228,19 @@ async def agent_invocation(payload, context):
         elif hasattr(event, 'text') and isinstance(event.text, str):
             text_content = event.text
         
-        # Solo enviar si hay texto válido
+        # Acumular respuesta para validación final
         if text_content:
+            full_response += text_content
             yield text_content
+    
+    # 🛡️ PASO 2: Validar OUTPUT con Guardrail (después del streaming)
+    if full_response:
+        output_validation = validate_with_guardrail(full_response, source="OUTPUT")
+        
+        if not output_validation['is_valid']:
+            # Si el output fue bloqueado, informar al usuario
+            print(f"❌ Output bloqueado por Guardrail")
+            yield f"\n\n⚠️ {output_validation['message']}"
 
 
 if __name__ == "__main__":
